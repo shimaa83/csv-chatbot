@@ -1,0 +1,21 @@
+
+@'
+.env
+.env.*
+!.env.example
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Runtime databases and indexes
+data/databases/
+data/indexes/
+*.duckdb
+*.duckdb.wal
+
+.DS_Store
+Thumbs.db
+'@ | Set-Content -Encoding utf8 .gitignore

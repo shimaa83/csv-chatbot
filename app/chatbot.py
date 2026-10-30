@@ -1,37 +1,46 @@
 
 import json
-import re
-
 import requests
 
 from app.config import OLLAMA_URL, OLLAMA_MODEL
-from app.database import execute_readonly_sql
-from app.rag import hybrid_search, format_context
-from app.text_to_sql import generate_sql
+
+from app.database import (
+    execute_readonly_sql,
+)
+
+from app.text_to_sql import (
+    generate_sql,
+    fix_sql,
+)
+
+from app.rag import (
+    hybrid_search,
+    format_context,
+)
 
 
-def detect_language(question: str) -> str:
-    """Detect whether the question is primarily Arabic or English."""
-    arabic_chars = len(
-        re.findall(r"[\u0600-\u06FF]", question)
+def detect_language(text: str) -> str:
+    """Detect whether the question is Arabic or English."""
+
+    arabic_count = sum(
+        "\u0600" <= char <= "\u06FF"
+        for char in text
     )
-    latin_chars = len(
-        re.findall(r"[A-Za-z]", question)
+
+    english_count = sum(
+        char.isascii() and char.isalpha()
+        for char in text
     )
 
-    if arabic_chars > latin_chars:
-        return "Arabic"
-
-    return "English"
+    return "Arabic" if arabic_count > english_count else "English"
 
 
-def call_llm(prompt: str, language: str) -> str:
-    """Call Qwen through Ollama and instruct it to answer in the requested language."""
-    language_instruction = (
-        "Answer entirely in Arabic. Use clear, natural Arabic."
-        if language == "Arabic"
-        else "Answer entirely in English."
-    )
+def call_llm(
+    prompt: str,
+    system_prompt: str = "",
+    timeout: int = 180,
+) -> str:
+    """Generate a natural-language answer using Ollama."""
 
     response = requests.post(
         f"{OLLAMA_URL}/api/chat",
@@ -40,12 +49,7 @@ def call_llm(prompt: str, language: str) -> str:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You are a helpful CSV data assistant. "
-                        f"{language_instruction} "
-                        "Use only the information provided. "
-                        "Never invent data or statistics."
-                    ),
+                    "content": system_prompt,
                 },
                 {
                     "role": "user",
@@ -57,7 +61,7 @@ def call_llm(prompt: str, language: str) -> str:
                 "temperature": 0,
             },
         },
-        timeout=180,
+        timeout=timeout,
     )
 
     response.raise_for_status()
@@ -66,112 +70,120 @@ def call_llm(prompt: str, language: str) -> str:
 
 
 def detect_route(question: str) -> str:
-    """
-    Route analytical questions to SQL and dataset metadata questions to RAG.
-    Supports Arabic and English.
-    """
-    q = question.lower().strip()
+    """Choose SQL for analytical questions and RAG for schema questions."""
 
-    # Questions about schema and dataset descriptions should use RAG.
-    metadata_patterns = [
-        r"\b(columns?|column names|field names|schema|"
-        r"data types?|dataset information|file information|"
-        r"describe the dataset|what does this dataset contain)\b",
-        r"الأعمدة|اسماء الأعمدة|أسماء الأعمدة|"
-        r"أسماء الحقول|اسماء الحقول|"
-        r"معلومات الملف|معلومات البيانات|"
-        r"وصف الملف|وصف البيانات|"
-        r"نوع البيانات|أنواع البيانات|"
-        r"العمود الذي|العمود اللى|"
-        r"أي عمود|ايه الأعمدة|ايه الاعمدة",
+    q = question.lower()
+
+    rag_keywords = [
+        "what columns",
+        "which columns",
+        "schema",
+        "structure",
+        "describe table",
+        "explain column",
+        "ما هي الأعمدة",
+        "ايه الأعمدة",
+        "ما هى الأعمدة",
+        "تركيب الجدول",
+        "هيكل الجدول",
+        "وصف الجدول",
+        "اشرح العمود",
     ]
 
-    if any(
-        re.search(pattern, q, re.IGNORECASE)
-        for pattern in metadata_patterns
-    ):
+    sql_keywords = [
+        "sum",
+        "total",
+        "average",
+        "avg",
+        "count",
+        "maximum",
+        "minimum",
+        "max",
+        "min",
+        "highest",
+        "lowest",
+        "compare",
+        "sales",
+        "revenue",
+        "quantity",
+        "orders",
+        "customers",
+        "top",
+        "أعلى",
+        "أقل",
+        "إجمالي",
+        "اجمالي",
+        "مجموع",
+        "متوسط",
+        "عدد",
+        "كم",
+        "قارن",
+        "مبيعات",
+        "العملاء",
+        "الطلبات",
+        "الكمية",
+        "الأكثر",
+        "الأقل",
+    ]
+
+    if any(keyword in q for keyword in rag_keywords):
         return "rag"
 
-    # Analytical and numeric questions should use SQL.
-    sql_patterns = [
-        r"\b(sum|total|average|avg|mean|median|count|"
-        r"how many|number of|"
-        r"highest|lowest|maximum|minimum|max|min|"
-        r"compare|comparison|group by|greater than|less than|"
-        r"most|least|top|bottom|sort|rank|"
-        r"calculate|percentage|percent|"
-        r"sales|revenue|profit|price|quantity|"
-        r"orders|customers|products|"
-        r"greater|fewer|more than|less than)\b",
-        r"إجمالي|إجمالى|مجموع|متوسط|المتوسط|"
-        r"عدد|كام|كم|"
-        r"أعلى|اعلى|أكبر|اكبر|"
-        r"أقل|اقل|أصغر|اصغر|"
-        r"أقصى|اقصى|أدنى|ادنى|"
-        r"احسب|حساب|قارن|مقارنة|"
-        r"الأكثر|الاكثر|الأقل|الاقل|"
-        r"ترتيب|رتب|نسبة|نسبه|"
-        r"مبيعات|المبيعات|إيرادات|ايرادات|"
-        r"أرباح|ارباح|ربح|سعر|أسعار|اسعار|"
-        r"كمية|كميات|طلبات|الطلبات|"
-        r"عملاء|العملاء|منتجات|المنتجات|"
-        r"تجاوز|أكبر من|اكبر من|أقل من|اقل من",
-    ]
-
-    if any(
-        re.search(pattern, q, re.IGNORECASE)
-        for pattern in sql_patterns
-    ):
+    if any(keyword in q for keyword in sql_keywords):
         return "sql"
 
-    # Default: questions about meaning and dataset metadata use RAG.
     return "rag"
 
 
 def answer_sql_question(
     question: str,
     dataset_id: str,
-    language: str,
 ) -> dict:
-    """Generate SQL, execute it, and explain the result."""
-    sql = generate_sql(question, dataset_id)
+    """
+    Generate SQL, execute it, and retry once if execution fails.
 
-    result = execute_readonly_sql(
+    The retry uses the actual schema and DuckDB error.
+    """
+
+    sql = generate_sql(
+        question=question,
         dataset_id=dataset_id,
-        sql=sql,
     )
+
+    try:
+        result = execute_readonly_sql(
+            dataset_id=dataset_id,
+            sql=sql,
+        )
+
+    except Exception as first_error:
+
+        # One correction attempt only.
+        corrected_sql = fix_sql(
+            question=question,
+            failed_sql=sql,
+            error=str(first_error),
+            dataset_id=dataset_id,
+        )
+
+        # execute_readonly_sql validates the corrected SQL again.
+        result = execute_readonly_sql(
+            dataset_id=dataset_id,
+            sql=corrected_sql,
+        )
+
+        sql = corrected_sql
 
     result_json = json.dumps(
         result,
         ensure_ascii=False,
+        indent=2,
         default=str,
     )
 
-    if language == "Arabic":
-        prompt = f"""
-أجب عن سؤال المستخدم باللغة العربية فقط.
+    language = detect_language(question)
 
-سؤال المستخدم:
-{question}
-
-استعلام SQL الذي تم تنفيذه:
-{sql}
-
-نتيجة SQL:
-{result_json}
-
-التعليمات:
-- استخدم القيم الموجودة في النتيجة فقط.
-- لا تخترع أرقامًا أو إحصائيات.
-- إذا كانت النتيجة فارغة، وضح أنه لا توجد سجلات مطابقة.
-- إذا كانت النتائج مختصرة، وضح ذلك للمستخدم.
-- اشرح النتيجة ببساطة وباختصار.
-- لا تترجم أسماء الأعمدة أو القيم الأصلية الموجودة في البيانات.
-"""
-    else:
-        prompt = f"""
-Answer the user's question in English only.
-
+    prompt = f"""
 User question:
 {question}
 
@@ -181,146 +193,117 @@ Executed SQL:
 SQL result:
 {result_json}
 
-Rules:
-- Use only values present in the result.
-- Never invent numbers or statistics.
-- If the result is empty, say no matching records were found.
-- Mention if the results were truncated.
-- Explain the result clearly and concisely.
-- Do not translate original column names or data values.
+Instructions:
+1. Answer the user's question using the SQL result only.
+2. Do not invent numbers or information.
+3. Explain the result clearly.
+4. If the result is empty, say no matching records were found.
+5. Mention if the result was truncated.
+6. Answer in {language}.
+"""
+
+    system_prompt = f"""
+You are a helpful data analyst.
+
+Answer questions based only on the supplied SQL result.
+Never invent data.
+Always respond in {language}.
 """
 
     answer = call_llm(
         prompt=prompt,
-        language=language,
+        system_prompt=system_prompt,
     )
 
     return {
-        "question": question,
         "route": "sql",
-        "language": language,
         "answer": answer,
         "sql": sql,
         "result": result,
-        "sources": [],
     }
 
 
 def answer_rag_question(
     question: str,
     dataset_id: str,
-    language: str,
 ) -> dict:
-    """Retrieve relevant dataset metadata and generate a grounded answer."""
+    """Answer schema and metadata questions using hybrid RAG."""
+
     documents = hybrid_search(
-        dataset_id=dataset_id,
         question=question,
+        dataset_id=dataset_id,
     )
-
-    if not documents:
-        message = (
-            "لم أجد معلومات كافية للإجابة عن السؤال."
-            if language == "Arabic"
-            else "I could not find enough information to answer the question."
-        )
-
-        return {
-            "question": question,
-            "route": "rag",
-            "language": language,
-            "answer": message,
-            "sql": None,
-            "result": None,
-            "sources": [],
-        }
 
     context = format_context(documents)
 
-    if language == "Arabic":
-        prompt = f"""
-أجب عن سؤال المستخدم باللغة العربية فقط، بالاعتماد على المعلومات المسترجعة.
+    language = detect_language(question)
 
-سؤال المستخدم:
-{question}
-
-معلومات الملف المسترجعة:
-{context}
-
-التعليمات:
-- استخدم المعلومات الموجودة في السياق فقط.
-- لا تخترع أسماء أعمدة أو قيمًا أو إحصائيات.
-- السياق يصف الملف وأعمدته، لكنه قد لا يحتوي على جميع صفوف CSV.
-- إذا لم تكن المعلومات كافية، وضح ذلك بوضوح.
-- احتفظ بأسماء الأعمدة الأصلية كما هي.
-"""
-    else:
-        prompt = f"""
-Answer the user's question in English only, using the retrieved information.
-
+    prompt = f"""
 User question:
 {question}
 
-Retrieved dataset information:
+Retrieved context:
 {context}
 
-Rules:
-- Use only information supported by the context.
-- Do not invent column names, values, or statistics.
-- The context describes the dataset and its columns;
-  it may not contain every row of the CSV.
-- If the information is insufficient, say so clearly.
-- Preserve original column names exactly as they appear.
+Instructions:
+1. Answer using the retrieved context only.
+2. Do not invent table names or columns.
+3. If the context does not contain the answer,
+   clearly say that the information is unavailable.
+4. Answer in {language}.
+"""
+
+    system_prompt = f"""
+You are a CSV data assistant.
+
+Answer using the provided context only.
+Do not invent information.
+Respond in {language}.
 """
 
     answer = call_llm(
         prompt=prompt,
-        language=language,
+        system_prompt=system_prompt,
     )
 
-    sources = [
-        {
-            "text": item["text"],
-            "kind": item["kind"],
-            "column": item.get("column"),
-            "score": item.get(
-                "rerank_score",
-                item.get("rrf_score"),
-            ),
-        }
-        for item in documents
-    ]
-
     return {
-        "question": question,
         "route": "rag",
-        "language": language,
         "answer": answer,
-        "sql": None,
-        "result": None,
-        "sources": sources,
+        "context": context,
     }
 
 
-def chat(question: str, dataset_id: str) -> dict:
-    """Main entry point for the bilingual CSV chatbot."""
+def chat(
+    question: str,
+    dataset_id: str,
+) -> dict:
+    """Main chatbot entry point."""
+
     if not question or not question.strip():
-        raise ValueError(
-            "Please enter a question."
-        )
+        return {
+            "route": "error",
+            "answer": "Please enter a question.",
+        }
 
-    question = question.strip()
-    language = detect_language(question)
-    route = detect_route(question)
+    try:
+        route = detect_route(question)
 
-    if route == "sql":
-        return answer_sql_question(
+        if route == "sql":
+            return answer_sql_question(
+                question=question,
+                dataset_id=dataset_id,
+            )
+
+        return answer_rag_question(
             question=question,
             dataset_id=dataset_id,
-            language=language,
         )
 
-    return answer_rag_question(
-        question=question,
-        dataset_id=dataset_id,
-        language=language,
-    )
+    except Exception as error:
+        return {
+            "route": "error",
+            "answer": (
+                "I couldn't process your question. "
+                f"Details: {str(error)}"
+            ),
+        }

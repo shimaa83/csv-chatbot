@@ -1,494 +1,515 @@
-::: {align="center"}
-# CSV Chatbot
+# CSV Chatbot — Text-to-SQL + Hybrid RAG
 
-### Ask Questions About Any CSV in Arabic or English
+An intelligent bilingual chatbot that allows users to upload one or multiple CSV files, ask questions in Arabic or English, and get answers using **Text-to-SQL** and **Hybrid Retrieval-Augmented Generation (RAG)**.
 
-**A bilingual AI data assistant powered by Text-to-SQL,
-Retrieval-Augmented Generation (RAG), DuckDB, and Qwen 2.5.**
+The project combines structured data analysis with semantic retrieval using DuckDB, FastAPI, Gradio, Ollama, embeddings, and reranking.
 
-Upload a CSV file, ask a question in natural language, and get an answer
-with SQL and query results when the question requires data analysis.
-:::
+---
 
-------------------------------------------------------------------------
+## Project Overview
 
-## Overview
+CSV Chatbot enables users to interact with their CSV datasets using natural language instead of writing SQL queries manually.
 
-CSV Chatbot turns tabular data into a conversational interface. Instead
-of manually filtering spreadsheets or writing SQL queries, users can
-upload a CSV file and ask questions in Arabic or English.
+Users can:
 
-The application uses two complementary approaches:
-
--   **Text-to-SQL:** Converts analytical questions into read-only DuckDB
-    SQL queries, executes them against the uploaded dataset, and
-    explains the results.
--   **RAG (Retrieval-Augmented Generation):** Retrieves relevant dataset
-    metadata and schema information to answer questions about the file,
-    its columns, and their meanings.
-
-A bilingual **Schema Profiler** uses the language model to generate
-Arabic and English descriptions and aliases for the actual columns in
-each uploaded dataset. The original column names and stored values
-remain unchanged.
+- Upload multiple CSV files into one workspace.
+- Automatically convert CSV files into DuckDB tables.
+- Explore table schemas and column descriptions.
+- Ask analytical questions using natural language.
+- Generate and execute read-only SQL queries.
+- Retrieve relevant information using Hybrid RAG.
+- Ask questions in Arabic or English and receive answers in the same language.
+- View generated SQL, query results, and retrieved RAG sources.
 
 ## Key Features
 
--   **Dynamic CSV ingestion:** Upload a CSV without defining its column
-    names in advance.
--   **Arabic and English questions:** Ask questions in either language.
--   **Text-to-SQL analytics:** Supports questions involving totals,
-    averages, counts, grouping, comparisons, and filtering, depending on
-    the dataset and generated query.
--   **Metadata RAG:** Retrieves relevant schema and dataset information
-    for descriptive questions.
--   **Bilingual schema profiling:** Generates a data dictionary with
-    Arabic and English column descriptions and aliases.
--   **Query transparency:** Displays the generated SQL and returned data
-    for SQL-routed questions.
--   **Dataset preview:** Shows a preview of uploaded rows.
--   **Local model integration:** Uses Ollama to run Qwen 2.5 locally,
-    avoiding a required hosted LLM API.
--   **Web interface:** Provides a conversational UI built with Gradio.
--   **DuckDB analytics:** Executes SQL against the uploaded tabular
-    dataset.
+### 1. Multi-CSV Workspace
+
+- Upload multiple CSV files in one session.
+- Each CSV file is registered as a separate DuckDB table.
+- All tables belong to one workspace and share one `dataset_id`.
+- Supports queries across related tables using SQL JOINs.
+- Generates a preview of uploaded data.
+- Applies configurable upload limits.
+
+### 2. Text-to-SQL
+
+The chatbot converts natural-language questions into SQL queries.
+
+Examples:
+
+| User Question | Expected SQL Operation |
+|---|---|
+| What is the total sales? | `SUM(quantity * unit_price)` |
+| What is the total quantity sold? | `SUM(quantity)` |
+| How many orders are there? | `COUNT(DISTINCT order_id)` |
+| Show sales by customer. | `JOIN` + `GROUP BY` |
+| What are the top-selling products? | `GROUP BY` + `ORDER BY` |
+
+Generated SQL is validated before execution to restrict queries to read-only operations.
+
+### 3. Hybrid RAG
+
+The RAG pipeline retrieves relevant information from the uploaded dataset and its schema.
+
+It combines:
+
+- Semantic vector retrieval.
+- Word-level TF-IDF retrieval.
+- Character-level TF-IDF retrieval.
+- Reciprocal Rank Fusion (RRF).
+- Optional Cross-Encoder reranking.
+
+The retrieved context is passed to the LLM to generate a grounded answer.
+
+### 4. Bilingual Support
+
+- Arabic and English questions.
+- Automatic language detection.
+- Arabic and English schema descriptions.
+- Responses generated in the language of the question.
+
+---
 
 ## Architecture
 
-``` mermaid
+```mermaid
 flowchart TD
-    A[Upload CSV] --> B[CSV Loader]
-    B --> C[DataFrame and Metadata]
-    C --> D[Register Dataset in DuckDB]
-    D --> E[Bilingual Schema Profiler]
-    E --> F[Schema and Sample Values]
-    F --> G[Text-to-SQL]
-    F --> H[RAG Metadata Index]
-    I[User Question: Arabic or English] --> J[Question Routing]
-    J -->|Analytical question| G
-    J -->|Metadata or schema question| H
-    G --> K[Read-only SQL Validation]
-    K --> L[Execute SQL in DuckDB]
-    L --> M[Qwen Answer Generation]
-    H --> M
-    M --> N[Gradio Chat UI]
+    A[User] --> B[Gradio UI]
+    B --> C[FastAPI]
+
+    C --> D[CSV Upload]
+    D --> E[CSV Loader]
+    E --> F[DuckDB Workspace]
+
+    F --> G[Schema Profiler]
+    G --> H[RAG Indexing]
+
+    H --> I[Embedding Model]
+    H --> J[Word TF-IDF]
+    H --> K[Character TF-IDF]
+
+    I --> L[Hybrid Search + RRF]
+    J --> L
+    K --> L
+
+    L --> M[Cross-Encoder Reranker]
+
+    B --> N[User Question]
+    N --> C
+
+    C --> O[Question Router]
+
+    O --> P[Text-to-SQL]
+    O --> Q[Hybrid RAG]
+
+    P --> R[SQL Validation]
+    R --> F
+
+    Q --> L
+
+    F --> S[Qwen LLM]
+    M --> S
+
+    S --> T[Final Answer]
+    T --> C
+    C --> B
 ```
 
-### Request flow
+### Important Architecture Decision
 
-1.  The user uploads a CSV file.
-2.  The loader reads the file and extracts its tabular data and
-    metadata.
-3.  The dataset is registered in DuckDB.
-4.  The schema profiler collects column names, data types, and
-    representative values, then generates a bilingual data dictionary.
-5.  The application routes each question to Text-to-SQL or RAG.
-6.  For analytical questions, the system generates and executes a
-    read-only SQL query.
-7.  For metadata questions, the system retrieves relevant indexed
-    documents.
-8.  The language model prepares a response, which is shown in the Gradio
-    interface.
+FastAPI is the single process responsible for accessing DuckDB and maintaining the RAG index.
+
+Gradio acts only as the frontend:
+
+- Uploads CSV files through the API.
+- Sends questions through the API.
+- Displays answers and results.
+
+This design avoids opening the same DuckDB database from separate Python processes, which previously caused file-locking errors.
+
+---
 
 ## Technology Stack
 
-  --------------------------------------------------------------------------------------------
-  Component               Technology                                   Purpose
-  ----------------------- -------------------------------------------- -----------------------
-  Language model          Qwen 2.5 3B via Ollama                       SQL generation and
-                                                                       natural-language
-                                                                       responses
+| Component | Technology |
+|---|---|
+| Programming Language | Python 3.13+ |
+| Package Management | uv |
+| Backend API | FastAPI |
+| Frontend | Gradio |
+| Database | DuckDB |
+| LLM | Qwen 2.5 3B |
+| LLM Runtime | Ollama |
+| Embeddings | `intfloat/multilingual-e5-small` |
+| Reranker | `Horizon-Labs/multilingual-reranker-small` |
+| Semantic Retrieval | Sentence Transformers |
+| Keyword Retrieval | TF-IDF |
+| Hybrid Ranking | Reciprocal Rank Fusion (RRF) |
+| Data Processing | Pandas |
+| API Communication | Requests |
 
-  Application language    Python                                       Application logic
-
-  User interface          Gradio                                       CSV upload, preview,
-                                                                       chat, and result
-                                                                       details
-
-  Analytical database     DuckDB                                       Store and query
-                                                                       uploaded tabular
-                                                                       datasets
-
-  Embeddings              `intfloat/multilingual-e5-small`             Multilingual semantic
-                                                                       retrieval
-
-  Reranker                `Horizon-Labs/multilingual-reranker-small`   Re-rank retrieved
-                                                                       candidates, when
-                                                                       enabled in the
-                                                                       retrieval pipeline
-
-  Retrieval               Hybrid search / RAG components               Retrieve relevant
-                                                                       schema and metadata
-                                                                       documents
-
-  Configuration           `.env`                                       Local model and
-                                                                       application settings
-
-  Dependency management   `uv`                                         Install dependencies
-                                                                       and run the application
-  --------------------------------------------------------------------------------------------
-
-> The embedding model and reranker are intended for the retrieval
-> pipeline. They are not needed to execute SQL queries themselves.
+---
 
 ## Project Structure
 
-The following is the intended high-level structure. Adjust names if your
-local repository differs.
-
-``` text
+```text
 csv-chatbot/
+│
+├── api/
+│   ├── __init__.py
+│   └── main.py
+│
 ├── app/
 │   ├── __init__.py
+│   ├── chatbot.py
 │   ├── config.py
 │   ├── csv_loader.py
 │   ├── database.py
+│   ├── embeddings.py
+│   ├── rag.py
 │   ├── schema_profiler.py
 │   ├── text_to_sql.py
-│   ├── rag.py
-│   ├── chatbot.py
 │   └── ui.py
+│
+├── tests/
+│
 ├── data/
-│   └── sample_sales.csv
-├── indexes/
+│   ├── uploads/
+│   ├── databases/
+│   └── indexes/
+│
 ├── .env
-├── .env.example
 ├── .gitignore
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
 ```
 
--   `csv_loader.py` --- reads CSV uploads and extracts file metadata.
--   `database.py` --- registers datasets in DuckDB and executes
-    validated read-only queries.
--   `schema_profiler.py` --- creates and caches bilingual schema
-    descriptions and aliases.
--   `text_to_sql.py` --- prompts the LLM to generate SQL from a question
-    and the dataset schema.
--   `rag.py` --- indexes and retrieves dataset metadata for RAG.
--   `chatbot.py` --- routes questions and coordinates the SQL and RAG
-    paths.
--   `ui.py` --- launches the Gradio interface.
--   `config.py` --- loads application configuration and directory
-    settings.
+### Main Modules
 
-## Requirements
+| Module | Responsibility |
+|---|---|
+| `api/main.py` | FastAPI application, upload, indexing, prediction, and health endpoints |
+| `app/ui.py` | Gradio user interface |
+| `app/config.py` | Application configuration |
+| `app/csv_loader.py` | CSV parsing and validation |
+| `app/database.py` | DuckDB connections, table registration, and SQL validation |
+| `app/schema_profiler.py` | Dataset and column profiling |
+| `app/embeddings.py` | Embedding model operations |
+| `app/rag.py` | RAG indexing, hybrid search, and reranking |
+| `app/text_to_sql.py` | Natural-language-to-SQL functionality |
+| `app/chatbot.py` | Question routing and final answer generation |
 
--   Windows, macOS, or Linux
--   Python version compatible with the project's `pyproject.toml`
--   [`uv`](https://docs.astral.sh/uv/)
--   [Ollama](https://ollama.com/) installed and running
--   Enough RAM and disk space for the selected local model and embedding
-    models
+---
 
 ## Installation
 
 ### 1. Clone the repository
 
-``` bash
-git clone <YOUR_REPOSITORY_URL>
+```bash
+git clone https://github.com/shimaa83/csv-chatbot.git
 cd csv-chatbot
 ```
 
-Replace `<YOUR_REPOSITORY_URL>` with your repository URL.
-
 ### 2. Install dependencies
 
-If the repository includes `pyproject.toml` and `uv.lock`:
-
-``` bash
+```bash
 uv sync
 ```
 
-### 3. Download the language model
+If multipart upload support is not installed:
 
-Start Ollama, then pull the model:
+```bash
+uv add python-multipart
+```
 
-``` bash
+### 3. Install and run Ollama
+
+Download Ollama from:
+
+https://ollama.com/
+
+Pull the Qwen model:
+
+```bash
 ollama pull qwen2.5:3b
 ```
 
-Verify that the model is available:
+Make sure Ollama is running and the model is available:
 
-``` bash
+```bash
 ollama list
 ```
 
-The application expects the Ollama API at `http://localhost:11434` by
-default.
-
 ### 4. Configure environment variables
 
-Create a `.env` file in the project root. Use the variable names
-expected by `app/config.py`. A typical configuration may look like this:
+Create a `.env` file in the project root.
 
-``` dotenv
+Configure the variables according to `app/config.py`.
+
+Example:
+
+```env
 OLLAMA_URL=http://localhost:11434
 OLLAMA_MODEL=qwen2.5:3b
 
-EMBEDDING_MODEL=intfloat/multilingual-e5-small
-RERANKER_MODEL=Horizon-Labs/multilingual-reranker-small
+MAX_UPLOAD_MB=50
+MAX_ROWS=500000
+
+CACHE_ENABLED=false
 ```
 
-Add any other required settings from your project's `app/config.py`,
-such as upload-size limits and data/index directories.
+Keep `.env` private. Never commit API keys, credentials, or local secrets.
 
-**Important:** Do not commit `.env` files, API keys, credentials, or
-private datasets. Keep secrets in environment variables and commit only
-a sanitized `.env.example`.
+---
 
-## Run the Application
+## Running the Application
 
-From the project root:
+The application uses two processes.
 
-``` bash
+### Terminal 1 — FastAPI
+
+Run from the project root:
+
+```bash
+uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
+```
+
+FastAPI documentation:
+
+http://127.0.0.1:8000/docs
+
+Health endpoint:
+
+http://127.0.0.1:8000/health
+
+### Terminal 2 — Gradio
+
+```bash
 uv run python -m app.ui
 ```
 
-Open the local URL shown in the terminal. With the default Gradio
-configuration, it is usually:
+Open the interface:
 
-``` text
 http://127.0.0.1:7860
+
+**Important:** Start FastAPI and use it as the only process accessing DuckDB. Do not run another Gradio process that directly accesses the same database files.
+
+---
+
+## API Endpoints
+
+### 1. Health Check
+
+`GET /health`
+
+Checks API readiness and loaded models.
+
+Example response:
+
+```json
+{
+  "status": "healthy",
+  "ready": true,
+  "models": {
+    "ollama": "qwen2.5:3b",
+    "embedding": "intfloat/multilingual-e5-small",
+    "reranker": "Horizon-Labs/multilingual-reranker-small"
+  }
+}
 ```
 
-Make sure Ollama is running before submitting questions.
+### 2. Upload CSV Files
 
-## How to Use
+`POST /upload`
 
-1.  Open the web interface.
-2.  Upload a `.csv` file.
-3.  Wait for the dataset to load and the schema profile/indexing steps
-    to finish.
-4.  Review the data preview and generated column descriptions.
-5.  Ask a question in Arabic or English.
-6.  Review the answer. For SQL-routed questions, inspect the generated
-    query and returned result in the answer details.
+Accepts multiple CSV files using multipart form-data.
 
-### Example dataset
+The endpoint:
 
-`data/sample_sales.csv`
+1. Validates uploaded files.
+2. Parses CSV content.
+3. Creates a unique `dataset_id`.
+4. Registers each CSV as a DuckDB table.
+5. Profiles the workspace schema.
+6. Builds the RAG index.
+7. Returns a preview and indexing information.
 
-``` csv
-order_id,product,city,sales
-1,Laptop,Cairo,25000
-2,Phone,Giza,12000
-3,Laptop,Cairo,18000
-4,Tablet,Alexandria,9000
+### 3. Ask a Question
+
+`POST /predict`
+
+Request:
+
+```json
+{
+  "question": "What is the total sales in Cairo?",
+  "dataset_id": "YOUR_DATASET_ID"
+}
 ```
 
-### Example questions
+Example response:
 
-  -----------------------------------------------------------------------
-  Question                            Expected operation
-  ----------------------------------- -----------------------------------
-  What is the total sales in Cairo?   Filter by city and calculate
-                                      `SUM(sales)`
-
-  ما إجمالي المبيعات في القاهرة؟      Arabic analytical question; filter
-                                      and calculate a total
-
-  What is the average sale?           Calculate `AVG(sales)`
-
-  How many orders are in the dataset? Calculate `COUNT(*)`
-
-  Show total sales by city.           Group by city and calculate totals
-
-  Which product has the highest sale? Sort or aggregate sales according
-                                      to the question
-
-  What columns are available?         Retrieve schema metadata
-
-  اشرحلي معنى كل عمود.                Retrieve or explain the column
-                                      descriptions
-  -----------------------------------------------------------------------
-
-For the example dataset, the expected values are:
-
--   Total sales in Cairo: **43,000**
--   Average of the four `sales` values: **16,000**
--   Number of rows/orders: **4**
--   Largest individual `sales` value: **25,000**
-
-These are example expectations for this sample file, not guaranteed
-results for arbitrary uploaded data.
-
-## Text-to-SQL vs. RAG
-
-  -----------------------------------------------------------------------
-  Capability              Text-to-SQL             RAG
-  ----------------------- ----------------------- -----------------------
-  Main purpose            Calculate and filter    Retrieve relevant
-                          values in rows          schema and metadata
-
-  Example                 "What is the total      "What does the `sales`
-                          sales in Cairo?"        column represent?"
-
-  Uses SQL execution      Yes                     Not necessarily
-
-  Uses retrieved          Not as its primary      Yes
-  documents               operation               
-
-  Best suited for         Counts, totals,         Column descriptions and
-                          averages, filters, and  dataset context
-                          grouped analysis        
-  -----------------------------------------------------------------------
-
-The routing logic determines which path handles a question. Accurate
-routing is important: a question that requires an exact calculation
-should reach SQL, while a question about the meaning of a column should
-use metadata retrieval.
-
-## Bilingual Data and Value Matching
-
-The schema profiler is designed to help the model understand unfamiliar
-column names across Arabic and English. For example, a file may use
-`city` as a column and contain `Cairo` as a stored value, while a user
-asks about `القاهرة`.
-
-The original database values are not automatically translated or
-rewritten. Cross-language value matching depends on the generated SQL
-logic and the available sample values. For production use, consider
-adding a deterministic value-mapping layer, fuzzy matching with
-confidence thresholds, and clarification when a requested value cannot
-be mapped reliably. This helps avoid incorrect empty results or
-unintended filters.
-
-## Configuration
-
-Review `app/config.py` and `.env.example` for the exact settings
-supported by your checkout.
-
-  Setting             Purpose
-  ------------------- -----------------------------------------------
-  `OLLAMA_URL`        Base URL for the local Ollama API
-  `OLLAMA_MODEL`      Name of the chat/generation model
-  `EMBEDDING_MODEL`   Embedding model used for retrieval
-  `RERANKER_MODEL`    Reranking model used by retrieval, if enabled
-
-The project may define additional configuration values for upload
-limits, index storage, caching, or timeouts. Use the names implemented
-in the code rather than adding unsupported environment variables.
-
-## Troubleshooting
-
-### Ollama connection error
-
--   Confirm Ollama is installed and running.
--   Check that `OLLAMA_URL` points to the correct host and port.
--   Run `ollama list` and confirm `qwen2.5:3b` is available.
--   Try a simple request through the local Ollama installation before
-    debugging the application.
-
-### The answer is zero or a filter returns no rows
-
--   Inspect the generated SQL shown in the UI.
--   Check the actual values in the relevant CSV column.
--   Remember that `Cairo` and `القاهرة` are different strings in the
-    database.
--   Add or improve value normalization/mapping rather than changing the
-    original data silently.
-
-### SQL generation fails
-
--   Check that the generated query uses the real column names and the
-    `dataset` table.
--   Check data types and null values.
--   Confirm the SQL validator allows the query shape.
--   Rephrase the question more precisely and retry.
-
-### RAG does not answer a schema question well
-
--   Confirm that indexing completed after upload.
--   Inspect the retrieved sources in the UI.
--   Ensure the index contains the generated schema descriptions if you
-    expect RAG to use them.
--   Rebuild or refresh the dataset index after changing the schema
-    profiling or indexing logic.
-
-### The first request is slow
-
-The first request may need to load the local language, embedding, or
-reranking model. Performance also depends on available RAM/VRAM, dataset
-size, and model settings.
-
-## Limitations and Security Notes
-
--   **LLM output can be wrong.** Always inspect SQL and verify important
-    results.
--   **Schema descriptions are inferred.** Column meanings generated by a
-    model may be incomplete or inaccurate.
--   **Value translation is not guaranteed.** A bilingual column
-    dictionary does not, by itself, guarantee that Arabic and English
-    values will match correctly.
--   **Read-only validation matters.** The application should reject
-    non-read-only SQL and restrict access to the intended dataset.
-    Regex-based validation alone is not a complete security boundary.
--   **Treat uploaded CSV files as untrusted input.** Validate file size,
-    encoding, column names, and data types.
--   **Do not expose the local app publicly without additional
-    security.** Add authentication, request limits, robust SQL
-    parsing/validation, isolation, and logging controls before
-    deployment.
--   **Privacy depends on the environment.** With a local Ollama model,
-    prompts can be processed locally, but any external services added to
-    the application may have separate data-handling policies.
-
-## Roadmap
-
-Potential improvements:
-
--   More robust Arabic/English value normalization and entity matching.
--   Better question routing and SQL-generation evaluation.
--   SQL parsing and strict query validation.
--   Automatic data-quality and column profiling.
--   Support for Excel and other tabular formats.
--   Conversation-aware follow-up questions.
--   Query-result visualizations.
--   Unit tests and a benchmark dataset for Text-to-SQL accuracy.
--   Docker or cloud deployment, if needed.
-
-## Development and Testing
-
-Before releasing a change, test at least:
-
--   CSV upload and parsing.
--   Numeric aggregation (`SUM`, `AVG`, `COUNT`).
--   Filtering by text and numeric values.
--   Grouped comparisons.
--   Arabic and English versions of equivalent questions.
--   Schema/metadata questions routed to RAG.
--   Invalid SQL and empty-result behavior.
--   Large files and missing values.
-
-Example local run:
-
-``` bash
-uv run python -m app.ui
+```json
+{
+  "success": true,
+  "route": "sql",
+  "answer": "The total sales in Cairo are ...",
+  "sql": "SELECT ...",
+  "result": {},
+  "context": null,
+  "sources": []
+}
 ```
 
-Add test commands here once a test suite is configured in the
-repository.
+The `route` indicates which approach was selected:
 
-## Contributing
+- `sql`: Text-to-SQL.
+- `rag`: Retrieval-Augmented Generation.
 
-Contributions and suggestions are welcome. For substantial changes,
-consider opening an issue first to discuss the intended behavior.
+The response also includes SQL results or retrieved sources when available.
 
-1.  Fork the repository.
-2.  Create a focused feature branch.
-3.  Add or update tests.
-4.  Update documentation.
-5.  Open a pull request with a clear description of the change.
+---
+
+## Example Dataset
+
+You can test the project using two related CSV files.
+
+### customers.csv
+
+```csv
+customer_id,customer_name,city,segment
+1001,Ahmed Hassan,Cairo,Retail
+1002,Mona Ali,Alexandria,Retail
+1003,Omar Samir,Giza,Corporate
+1004,Nour Khaled,Cairo,Corporate
+1005,Salma Adel,Mansoura,Retail
+1006,Youssef Mahmoud,Alexandria,Corporate
+```
+
+### orders.csv
+
+```csv
+order_id,customer_id,order_date,product,quantity,unit_price
+5001,1001,2026-10-01,Laptop,1,32000
+5002,1002,2026-10-02,Headphones,2,1800
+5003,1001,2026-10-05,Mouse,2,450
+5004,1003,2026-10-07,Monitor,2,7500
+5005,1004,2026-10-09,Laptop,2,32000
+5006,1002,2026-10-12,Keyboard,1,1200
+5007,1005,2026-10-14,Printer,1,6800
+5008,1006,2026-10-16,Monitor,1,7500
+5009,1003,2026-10-18,Keyboard,3,1200
+5010,1004,2026-10-20,Headphones,1,1800
+```
+
+Relationship:
+
+```text
+customers.customer_id = orders.customer_id
+```
+
+### Example Questions
+
+**Text-to-SQL**
+
+```text
+What is the total sales in Cairo?
+```
+
+```text
+Show total sales for each customer.
+```
+
+```text
+How many orders does each customer have?
+```
+
+```text
+What is the total quantity sold for each product?
+```
+
+**RAG**
+
+```text
+What columns are available in the customers table?
+```
+
+```text
+Explain the structure of the orders table.
+```
+
+```text
+What is the relationship between customers and orders?
+```
+
+### Important Metric Definitions
+
+To avoid confusing different business metrics:
+
+| Metric | Correct Calculation |
+|---|---|
+| Total Sales / Revenue | `SUM(quantity * unit_price)` |
+| Total Quantity | `SUM(quantity)` |
+| Number of Orders | `COUNT(DISTINCT order_id)` |
+
+Quantity must never be described as sales revenue.
+
+---
+
+## Testing
+
+Run the test suite:
+
+```bash
+uv run pytest
+```
+
+Check the API:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Use Swagger UI to test `/upload` and `/predict`:
+
+http://127.0.0.1:8000/docs
+
+---
+
+## Security and Limitations
+
+- SQL execution is intended to be read-only.
+- SQL validation restricts supported query operations, but regex-based validation should not be considered a complete security boundary.
+- Uploaded files are subject to configurable size and row limits.
+- The current architecture uses a single FastAPI process for DuckDB access.
+- The RAG index is maintained by the API process and is not automatically shared between separate application processes.
+- Production deployment should add authentication, per-user workspace isolation, resource limits, and stronger SQL validation.
+- Large CSV files and model inference may require significant RAM and CPU/GPU resources.
+
+---
+
+## Future Improvements
+
+- Persistent RAG indexing and workspace recovery.
+- User authentication and workspace management.
+- Better handling of CSV relationships and automatic join detection.
+- More advanced SQL validation and query planning.
+- Query caching and performance optimization.
+- Automated evaluation for Text-to-SQL and RAG.
+- Deployment with a scalable inference service.
+
+---
+
+## Author
+
+**Shimaa**
+
+GitHub: https://github.com/shimaa83
+
+---
 
 ## License
 
-No license has been specified in this README. Add a `LICENSE` file and
-update this section before distributing the project.
-
-------------------------------------------------------------------------
-
-::: {align="center"}
-**CSV Chatbot --- From raw CSV files to conversational data analysis.**
-:::
+Add a license file before distributing the project publicly.
